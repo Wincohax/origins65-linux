@@ -1,0 +1,7 @@
+/target
+__pycache__/
+*.pyc
+# HP's NGENUITY installer used for reverse engineering: proprietary, never commit it
+/HyperX_NGENUITY_Installer/
+# T3 Code project assets
+/assets/

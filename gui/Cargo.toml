@@ -1,0 +1,10 @@
+[package]
+name = "origins65-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop GUI for the HyperX Alloy Origins 65 Linux lighting driver"
+
+[dependencies]
+gpui = { package = "gpui-ce", version = "=0.3.0" }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0" }
+origins65 = { path = "../driver" }

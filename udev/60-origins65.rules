@@ -1,0 +1,5 @@
+# HyperX Alloy Origins 65 (03f0:038f): give the logged-in user access without root.
+# USB device node (usbfs): lighting and settings go through interface 3.
+SUBSYSTEM=="usb", ATTR{idVendor}=="03f0", ATTR{idProduct}=="038f", TAG+="uaccess"
+# hidraw nodes: key-press and brightness notifications come from interface 1.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="038f", TAG+="uaccess"

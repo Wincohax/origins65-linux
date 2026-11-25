@@ -1,0 +1,3 @@
+[workspace]
+members = ["driver", "gui"]
+resolver = "3"
