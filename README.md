@@ -106,6 +106,16 @@ The desktop app also needs a few system development libraries; see [`gui/README.
 Developer notes for the driver library and its tests are in [`driver/README.md`](driver/README.md), and the
 USB protocol is documented in [`docs/origins65-protocol.md`](docs/origins65-protocol.md).
 
+### Building the AppImage
+
+To package the desktop app as a single-file AppImage that runs on most Linux distributions, run the build script where the desktop app's build dependencies are installed (inside the distrobox on Bazzite):
+
+```bash
+packaging/build-appimage.sh      # → target/appimage/Origins65-Lighting-x86_64.AppImage
+```
+
+The first run downloads linuxdeploy and appimagetool into `~/.cache/appimage-tools`.
+
 ## About
 
 This is an independent project, not affiliated with HP or HyperX. The lighting protocol was worked out by
