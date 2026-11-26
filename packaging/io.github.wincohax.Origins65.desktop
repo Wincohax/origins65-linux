@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Origins 65 Lighting
+Comment=RGB lighting controller for the HyperX Alloy Origins 65 keyboard
+Exec=origins65-gui
+Icon=io.github.wincohax.Origins65
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=keyboard;hyperx;origins65;rgb;lighting;
+StartupWMClass=io.github.wincohax.Origins65
+StartupNotify=true

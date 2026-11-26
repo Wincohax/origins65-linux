@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- Deep hardware studio badge background -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c1926"/>
+      <stop offset="55%" stop-color="#11131b"/>
+      <stop offset="100%" stop-color="#0b0c12"/>
+    </linearGradient>
+
+    <!-- HyperX crimson outer border gradient -->
+    <linearGradient id="rimGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff2a55"/>
+      <stop offset="50%" stop-color="#e11d48"/>
+      <stop offset="100%" stop-color="#9f1239"/>
+    </linearGradient>
+
+    <!-- Warm HyperX crimson ambient glow behind keyboard -->
+    <radialGradient id="crimsonGlow" cx="50%" cy="54%" r="48%">
+      <stop offset="0%" stop-color="#ff1e42" stop-opacity="0.58"/>
+      <stop offset="55%" stop-color="#e11d48" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#e11d48" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Keyboard chassis metallic surface -->
+    <linearGradient id="deckGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#252938"/>
+      <stop offset="100%" stop-color="#12151f"/>
+    </linearGradient>
+
+    <!-- RGB wave lighting gradient spanning the full keyboard deck (HyperX crimson -> flame -> gold -> cyan) -->
+    <linearGradient id="rgbWave" gradientUnits="userSpaceOnUse" x1="46" y1="86" x2="210" y2="172">
+      <stop offset="0%" stop-color="#ff1744"/>
+      <stop offset="30%" stop-color="#ff4d2e"/>
+      <stop offset="60%" stop-color="#ffb800"/>
+      <stop offset="82%" stop-color="#14e8b4"/>
+      <stop offset="100%" stop-color="#00c8ff"/>
+    </linearGradient>
+
+    <!-- Underglow strip gradient -->
+    <linearGradient id="underglowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff1744"/>
+      <stop offset="40%" stop-color="#ff3d3d"/>
+      <stop offset="72%" stop-color="#ffae00"/>
+      <stop offset="100%" stop-color="#00d4ff"/>
+    </linearGradient>
+
+    <!-- Subtle top sheen on keycaps -->
+    <linearGradient id="keySheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.22"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded squircle app badge -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bgGrad)" stroke="url(#rimGrad)" stroke-width="10"/>
+
+  <!-- Ambient HyperX crimson glow -->
+  <ellipse cx="128" cy="134" rx="102" ry="76" fill="url(#crimsonGlow)"/>
+
+  <!-- RGB underglow bar beneath the 65% deck -->
+  <rect x="38" y="182" width="180" height="16" rx="8" fill="url(#underglowGrad)" opacity="0.85"/>
+
+  <!-- 65% Keyboard aluminum frame -->
+  <rect x="30" y="62" width="196" height="126" rx="22" fill="url(#deckGrad)" stroke="#ff2a55" stroke-opacity="0.55" stroke-width="4"/>
+
+  <!-- Inner recessed key well -->
+  <rect x="40" y="72" width="176" height="106" rx="14" fill="#0b0d14"/>
+
+  <!-- Backlit keycaps rendered with unified RGB wave gradient -->
+  <g fill="url(#rgbWave)">
+    <!-- Row 1: 4 bold keys (top row) -->
+    <rect x="48" y="80" width="32" height="26" rx="6"/>
+    <rect x="86" y="80" width="32" height="26" rx="6"/>
+    <rect x="124" y="80" width="32" height="26" rx="6"/>
+    <rect x="162" y="80" width="46" height="26" rx="6"/>
+
+    <!-- Row 2: 4 bold keys (home row, staggered) -->
+    <rect x="48" y="112" width="42" height="26" rx="6"/>
+    <rect x="96" y="112" width="32" height="26" rx="6"/>
+    <rect x="134" y="112" width="32" height="26" rx="6"/>
+    <rect x="172" y="112" width="36" height="26" rx="6"/>
+
+    <!-- Row 3: Left mod, glowing spacebar, 65% arrow cluster block -->
+    <rect x="48" y="144" width="28" height="26" rx="6"/>
+    <rect x="82" y="144" width="84" height="26" rx="6"/>
+    <rect x="172" y="144" width="36" height="26" rx="6"/>
+  </g>
+
+  <!-- Keycap sculpted bevel sheen -->
+  <g fill="url(#keySheen)">
+    <rect x="48" y="80" width="32" height="26" rx="6"/>
+    <rect x="86" y="80" width="32" height="26" rx="6"/>
+    <rect x="124" y="80" width="32" height="26" rx="6"/>
+    <rect x="162" y="80" width="46" height="26" rx="6"/>
+
+    <rect x="48" y="112" width="42" height="26" rx="6"/>
+    <rect x="96" y="112" width="32" height="26" rx="6"/>
+    <rect x="134" y="112" width="32" height="26" rx="6"/>
+    <rect x="172" y="112" width="36" height="26" rx="6"/>
+
+    <rect x="48" y="144" width="28" height="26" rx="6"/>
+    <rect x="82" y="144" width="84" height="26" rx="6"/>
+    <rect x="172" y="144" width="36" height="26" rx="6"/>
+  </g>
+
+  <!-- Top HyperX crimson indicator bar above the deck -->
+  <rect x="96" y="38" width="64" height="10" rx="5" fill="#ff2a55"/>
+</svg>
