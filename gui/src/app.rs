@@ -38,6 +38,7 @@ const RED: u32 = 0xef4444;
 pub struct Origins65App {
     driver: DriverClient,
     _event_pump: Task<()>,
+    on_live_state_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 
     // Device state
     device_info: Option<DeviceInfo>,
@@ -71,7 +72,10 @@ pub struct Origins65App {
 }
 
 impl Origins65App {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        on_live_state_changed: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (driver, evt_rx) = DriverClient::spawn();
         driver.send(DriverCommand::FetchInfo);
 
@@ -106,6 +110,7 @@ impl Origins65App {
         Self {
             driver,
             _event_pump: event_pump,
+            on_live_state_changed,
             device_info: None,
             hw_brightness: 100,
             busy_message: Some("Reading keyboard info...".into()),
@@ -129,6 +134,32 @@ impl Origins65App {
         }
     }
 
+    fn set_live_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        if self.live_running == running {
+            return;
+        }
+        self.live_running = running;
+        if let Some(cb) = self.on_live_state_changed.as_ref().map(Arc::clone) {
+            cx.background_spawn(async move {
+                cb(running);
+            })
+            .detach();
+        }
+    }
+
+    pub fn toggle_live_from_tray(&mut self, cx: &mut Context<Self>) {
+        self.toggle_live(cx);
+    }
+
+    pub fn clear_transient_window_state(&mut self) {
+        self.dragging_slider = None;
+        self.hex_editing = false;
+    }
+
+    pub fn shutdown(&mut self) {
+        self.driver.shutdown();
+    }
+
     fn handle_driver_event(&mut self, event: DriverEvent, cx: &mut Context<Self>) {
         match event {
             DriverEvent::Busy(msg) => {
@@ -145,7 +176,7 @@ impl Origins65App {
                 self.error_banner = Some(("Failed to read keyboard".into(), err));
             }
             DriverEvent::LiveState { running, note } => {
-                self.live_running = running;
+                self.set_live_running(running, cx);
                 if let Some(n) = note {
                     self.status_notice = Some(n);
                 }
@@ -154,7 +185,7 @@ impl Origins65App {
                 self.hw_brightness = pct;
             }
             DriverEvent::LiveExitedError(err) => {
-                self.live_running = false;
+                self.set_live_running(false, cx);
                 self.error_banner = Some(("Live preview stopped with an error".into(), err));
             }
             DriverEvent::BrightnessApplied(Ok(pct)) => {
