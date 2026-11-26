@@ -1,67 +1,57 @@
-# HyperX Alloy Origins 65 — Desktop GUI (`origins65-gui`)
+# Origins 65 Lighting: desktop app
 
-Desktop lighting controller for the HyperX Alloy Origins 65 (`03f0:038f`), built in Rust with **GPUI-CE** (`gpui-ce = "=0.3.0"` and `gpui_ce_platform = "=0.3.0"`).
+This is the source for the desktop app (`origins65-gui`). If you just want to use it, grab the AppImage;
+see the [main README](../README.md). These notes are for building it yourself.
 
-The GUI links directly against the Rust `origins65` library crate (`driver/`) in-process—no Python runtime or subprocesses are needed. A single dedicated worker thread owns the `Origins65` USB/hidraw handle and runs the live rendering loop alongside `info`, `brightness`, `slot`, and `save` operations.
+The app is written in Rust with [GPUI-CE](https://github.com/gpui-ce/gpui-ce) (`gpui-ce` /
+`gpui_ce_platform` 0.3.0) and uses the `origins65` driver library in `../driver` directly, so there's no
+Python or helper process.
 
-## Features
+## What's inside
 
-- **Layer editor**: add, duplicate, remove, and reorder layers (top-to-bottom); pick any of the 12 looped and key-press effects; edit speed (clamped to each effect's range), opacity, wave angle, swipe direction, single/random/list colors (swatches, RGB sliders, and `#RRGGBB` hex entry), and per-key masks on an interactive 69-LED (US 67-key + outer spacebar LEDs) keyboard layout.
-- **Live preview**: Start/Stop live streaming directly from the worker thread with software brightness and FPS controls; reacts in real time to key-press notifications and hardware `Fn+[` / `Fn+]` brightness notifications, updates immediately when layers or parameters change, and cleanly releases the device on exit so the keyboard returns to onboard lighting.
-- **Save to keyboard**: target onboard slot `0`–`2`, rendered brightness, activate-after-save toggle, pre-upload validation of onboard rules (at most one key-press effect, and only `fade`, `explosion`, or `flame`), and live upload progress callbacks straight from `Origins65::save_prepared`.
-- **Device panel**: displays firmware, VID/PID, country code, active slot, and per-slot brightness and game mode, plus a hardware brightness slider and active-slot switcher.
-- **USB arbitration & error reporting**: all hardware I/O is serialized on the single device thread (releasing the handle on error so reconnects recover cleanly) and errors are displayed in an inline banner.
+- **Layer editor**: add, duplicate, reorder and remove effect layers; tune speed, opacity, angle,
+  direction and colours; limit a layer to specific keys on a clickable keyboard map.
+- **Live preview**: streams the effect to the keyboard and reacts to key presses and the `Fn` brightness
+  keys.
+- **Save to keyboard**: writes to onboard slot 0, 1 or 2, with a progress bar and a check that the layers
+  fit what the keyboard can store.
+- **Device panel**: firmware, active slot, per-slot brightness, hardware brightness and slot switching.
+- **System tray**: closing the window keeps the app (and live lighting) running; *Quit* in the tray menu
+  or `Ctrl+Q` exits. `--background` starts straight into the tray. Launching it again while it's running
+  just brings the existing window forward.
 
-## Build prerequisites (Bazzite / immutable Fedora via Distrobox)
-
-Immutable hosts like Bazzite include the runtime libraries (`libxkbcommon`, `libwayland-client`, `libxcb`, `libvulkan`, `libfontconfig`, `libfreetype`) needed to **run** the binary, but omit the `-devel` headers and `.pc` files needed to **build** GPUI-CE. Use a Fedora 43 Distrobox container so the host OS stays untouched and the resulting binary links against an older-or-equal glibc (2.42) that runs natively on Bazzite 45 (glibc 2.44):
-
-```bash
-distrobox create --yes --name gpui-dev --image registry.fedoraproject.org/fedora:43
-distrobox enter gpui-dev -- sudo dnf install -y \
-    gcc \
-    pkgconf-pkg-config \
-    libxkbcommon-devel \
-    libxkbcommon-x11-devel \
-    wayland-devel \
-    libxcb-devel \
-    xcb-util-devel \
-    fontconfig-devel \
-    freetype-devel \
-    vulkan-headers \
-    vulkan-loader-devel \
-    libX11-devel \
-    openssl-devel \
-    dbus-devel
-```
+All USB access runs on one worker thread (`src/driver.rs`), so the window never freezes while talking to
+the keyboard.
 
 ## Building
 
-Build the release binary from the workspace root inside the `gpui-dev` Distrobox (reusing your host `~/.cargo` toolchain):
+GPUI needs a few development libraries. On Fedora:
 
 ```bash
-distrobox enter gpui-dev -- bash -lc '
-  export PATH="$HOME/.cargo/bin:$PATH"
-  cd /path/to/my-keyboard-driver-2
-  cargo build -p origins65-gui --release
-'
+sudo dnf install gcc pkgconf-pkg-config libxkbcommon-devel libxkbcommon-x11-devel wayland-devel \
+  libxcb-devel xcb-util-devel fontconfig-devel freetype-devel vulkan-headers vulkan-loader-devel \
+  libX11-devel
 ```
 
-Run unit tests and clippy (layout verification against `origins65::layout` and mock-transport worker thread tests, no hardware or Python required):
+On immutable systems (Bazzite, Silverblue, …) install those in a Fedora
+[distrobox](https://distrobox.it) instead and build there. The finished binary runs on the host:
 
 ```bash
-distrobox enter gpui-dev -- bash -lc '
-  export PATH="$HOME/.cargo/bin:$PATH"
-  cd /path/to/my-keyboard-driver-2
-  cargo test -p origins65-gui
-  cargo clippy -p origins65-gui --all-targets -- -D warnings
-'
-```
-
-## Running
-
-The compiled binary runs directly on the Bazzite host (no Distrobox or Python needed at runtime):
-
-```bash
+distrobox create --name gpui-dev --image registry.fedoraproject.org/fedora:43
+distrobox enter gpui-dev -- sudo dnf install -y <packages above>
+distrobox enter gpui-dev -- bash -lc 'cd /path/to/origins65-linux && cargo build -p origins65-gui --release'
 ./target/release/origins65-gui
 ```
+
+Use Fedora 43 (or older) for the container: the binary then needs glibc 2.42 or newer, so it runs on newer
+hosts as well.
+
+## Tests
+
+```bash
+cargo test -p origins65-gui                                   # no keyboard needed
+cargo clippy -p origins65-gui --all-targets -- -D warnings
+```
+
+The tests check the on-screen layout against the driver's LED map, the layer model, the worker thread
+(against a mock keyboard), tray menu handling and the single-instance socket.
