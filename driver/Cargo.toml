@@ -3,6 +3,8 @@ name = "origins65"
 version = "0.1.0"
 edition = "2024"
 description = "Linux lighting driver and CLI for the HyperX Alloy Origins 65 keyboard (03f0:038f)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Wincohax/origins65-linux"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

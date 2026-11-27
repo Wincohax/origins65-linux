@@ -78,6 +78,8 @@ for dir in packaging/icons/*x*/; do
     install -d "$APPDIR/usr/share/icons/hicolor/$size/apps"
     install -m 644 "$dir/$APP_ID.png" "$APPDIR/usr/share/icons/hicolor/$size/apps/$APP_ID.png"
 done
+# The GPL requires the license text to travel with every copy of the program.
+install -D -m 644 LICENSE "$APPDIR/usr/share/licenses/$APP_ID/LICENSE"
 # The AppDir root needs the desktop file, the icon and .DirIcon.
 install -m 644 "$DESKTOP_SRC" "$APPDIR/$APP_ID.desktop"
 install -m 644 "$ICON_256" "$APPDIR/$APP_ID.png"

@@ -120,3 +120,12 @@ The first run downloads linuxdeploy and appimagetool into `~/.cache/appimage-too
 
 This is an independent project, not affiliated with HP or HyperX. The lighting protocol was worked out by
 studying how NGENUITY 2.39 talks to the keyboard.
+
+## License
+
+Origins 65 Lighting is free software: you can redistribute it and/or modify it under the terms of the
+[GNU General Public License](LICENSE), version 3 or (at your option) any later version. It comes with
+no warranty.
+
+The license covers everything in this repository: the driver, the command-line tool, the desktop app
+and the Python reference tools.
