@@ -121,7 +121,7 @@ impl ksni::Tray for Origins65Tray {
         let description = if self.live_running {
             "Live lighting active"
         } else {
-            "HyperX Alloy Origins 65 lighting controller"
+            "HyperX Alloy Origins lighting controller"
         };
         ksni::ToolTip {
             icon_name: String::new(),

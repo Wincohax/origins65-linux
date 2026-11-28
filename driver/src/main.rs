@@ -7,16 +7,15 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
-use origins65::device::{
-    Notification, Origins65, SLOTS, prepare_onboard_save,
-};
-use origins65::effects::{
-    EffectKind, Engine, SYNC_FPS, parse_layer_spec, scale_frame,
-};
-use origins65::layout::{KEYS, NUM_LEDS, key_by_usage};
+use origins65::device::{Notification, SLOTS, prepare_onboard_save};
+use origins65::effects::{EffectKind, Engine, parse_layer_spec_for, scale_frame};
+use origins65::keyboard::{detect_model, open_keyboard};
+use origins65::layout::NUM_LEDS;
+use origins65::model::Model;
 
 const ABOUT: &str = "\
-HyperX Alloy Origins 65 (03f0:038f) lighting driver for Linux.
+HyperX Alloy Origins 65 (03f0:038f) and Alloy Origins Core TKL (03f0:098f, 0951:16e6) lighting
+driver for Linux. The connected keyboard is detected automatically.
 
 Effects are written as layer specs, top layer first:
     NAME[:key=value,...]
@@ -38,8 +37,18 @@ Examples:
 #[derive(Parser)]
 #[command(name = "origins65", about = ABOUT, verbatim_doc_comment)]
 struct Cli {
+    /// Keyboard model (default: detect the connected one)
+    #[arg(long, global = true, value_parser = parse_model)]
+    model: Option<Model>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+fn parse_model(s: &str) -> Result<Model, String> {
+    Model::from_id(s).ok_or_else(|| {
+        let ids: Vec<&str> = Model::ALL.iter().map(|m| m.id()).collect();
+        format!("expected one of: {}", ids.join(", "))
+    })
 }
 
 #[derive(Subcommand)]
@@ -94,10 +103,13 @@ enum Cmd {
     Effects,
 }
 
-fn parse_layers_cli(specs: &[String]) -> Result<Vec<origins65::effects::Layer>, String> {
+fn parse_layers_cli(
+    specs: &[String],
+    model: Model,
+) -> Result<Vec<origins65::effects::Layer>, String> {
     let mut out = Vec::with_capacity(specs.len());
     for spec in specs {
-        let (layer, warning) = parse_layer_spec(spec)?;
+        let (layer, warning) = parse_layer_spec_for(spec, model)?;
         if let Some(note) = warning {
             eprintln!("{note}");
         }
@@ -116,13 +128,16 @@ fn install_stop_handler() -> Arc<AtomicBool> {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    let offline_model = || cli.model.or_else(detect_model).unwrap_or_default();
     match cli.cmd {
         Cmd::Keys => {
-            let line = KEYS.iter().map(|k| k.name).collect::<Vec<_>>().join(" ");
+            let model = offline_model();
+            let line = model.keys().iter().map(|k| k.name).collect::<Vec<_>>().join(" ");
             println!("{line}");
             return Ok(());
         }
         Cmd::Effects => {
+            let model = offline_model();
             for kind in EffectKind::ALL {
                 let kind_str = if kind.is_triggered() {
                     if kind.onboard_trigger_code().is_some() {
@@ -133,13 +148,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 } else {
                     "looped"
                 };
+                let (min, max, default) = model.speed_range(kind);
                 println!(
-                    "{:<10} {:<22} speed {}-{} ms, default {}",
+                    "{:<10} {:<22} speed {min}-{max} ms, default {default}",
                     kind.name(),
                     kind_str,
-                    kind.min_speed(),
-                    kind.max_speed(),
-                    kind.default_speed()
                 );
             }
             return Ok(());
@@ -149,21 +162,25 @@ fn run(cli: Cli) -> Result<(), String> {
 
     match cli.cmd {
         Cmd::Info { json } => {
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
             if json {
                 let full = kb.read_full_info().map_err(|e| e.to_string())?;
                 let text = to_python_json(&full)?;
                 println!("{text}");
             } else {
                 let info = kb.device_info().map_err(|e| e.to_string())?;
-                let current = kb.read_profile(None, false).map_err(|e| e.to_string())?;
+                let current = kb.read_profile(None).map_err(|e| e.to_string())?;
                 println!(
-                    "HyperX Alloy Origins 65  {}:{}  firmware {}  country code {}",
-                    info.vid, info.pid, info.firmware, info.country_code
+                    "{}  {}:{}  firmware {}  country code {}",
+                    kb.model().name(),
+                    info.vid,
+                    info.pid,
+                    info.firmware,
+                    info.country_code
                 );
                 println!("current profile: {}", current.describe());
                 for s in 0..SLOTS {
-                    match kb.read_profile(Some(s), false) {
+                    match kb.read_profile(Some(s)) {
                         Ok(prof) => println!("slot {s} profile:   {}", prof.describe()),
                         Err(e) => println!("slot {s} profile:   unreadable ({e})"),
                     }
@@ -172,13 +189,13 @@ fn run(cli: Cli) -> Result<(), String> {
         }
 
         Cmd::Brightness { percent } => {
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
             let prof = kb.set_brightness(percent).map_err(|e| e.to_string())?;
             println!("brightness set: {}", prof.describe());
         }
 
         Cmd::Slot { slot } => {
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
             kb.select_slot(slot, false).map_err(|e| e.to_string())?;
             let active = kb.active_slot().map_err(|e| e.to_string())?;
             println!("active onboard slot: {active}");
@@ -190,8 +207,9 @@ fn run(cli: Cli) -> Result<(), String> {
             brightness,
             duration,
         } => {
-            let layers = parse_layers_cli(&specs)?;
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
+            let model = kb.model();
+            let layers = parse_layers_cli(&specs, model)?;
             let mut engine = Engine::new(layers);
             let stop = install_stop_handler();
             let period = if fps > 0.0 {
@@ -210,17 +228,17 @@ fn run(cli: Cli) -> Result<(), String> {
                 if duration > 0.0 && start.duration_since(t0).as_secs_f64() >= duration {
                     break;
                 }
-                for rep in kb.read_notifications(Duration::ZERO).map_err(|e| e.to_string())? {
-                    match Notification::parse(&rep) {
-                        Some(Notification::KeyEvent {
+                for event in kb.poll_events(Duration::ZERO).map_err(|e| e.to_string())? {
+                    match event {
+                        Notification::KeyEvent {
                             usage,
                             pressed: true,
-                        }) => {
-                            if let Some(key) = key_by_usage(usage) {
+                        } => {
+                            if let Some(key) = model.key_by_usage(usage) {
                                 engine.key_pressed(key);
                             }
                         }
-                        Some(Notification::BrightnessChanged { percent, .. }) => {
+                        Notification::BrightnessChanged { percent, .. } => {
                             println!("hardware brightness changed to {percent}%");
                             let _ = io::stdout().flush();
                         }
@@ -242,23 +260,25 @@ fn run(cli: Cli) -> Result<(), String> {
             brightness,
             no_activate,
         } => {
-            let layers = parse_layers_cli(&specs)?;
-            let prepared = prepare_onboard_save(&layers, brightness)?;
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
+            let model = kb.model();
+            let layers = parse_layers_cli(&specs, model)?;
+            let prepared = prepare_onboard_save(&layers, brightness, model)?;
 
-            let secs = (prepared.frames.len() as f64) / (SYNC_FPS as f64);
+            let fps = model.sync_fps();
+            let secs = (prepared.frames.len() as f64) / (fps as f64);
             let trig_suffix = match &prepared.trigger {
                 Some(t) => format!(", onboard key-press effect: {}", t.kind.name()),
                 None => String::new(),
             };
             println!(
-                "rendered {} frames ({secs:.1} s loop at {SYNC_FPS} fps){trig_suffix}",
+                "rendered {} frames ({secs:.1} s loop at {fps} fps){trig_suffix}",
                 prepared.frames.len()
             );
             let _ = io::stdout().flush();
 
             let profile_note = kb
-                .save_prepared(slot, &prepared, !no_activate, |done, total| {
+                .save_prepared(slot, &prepared, !no_activate, &mut |done, total| {
                     let pct = done * 100 / total;
                     print!("\ruploading to slot {slot}: {pct:3}%");
                     let _ = io::stdout().flush();
@@ -275,8 +295,8 @@ fn run(cli: Cli) -> Result<(), String> {
         }
 
         Cmd::Identify { step } => {
-            let mut kb = Origins65::open().map_err(|e| e.to_string())?;
-            let mut order: Vec<_> = KEYS.iter().collect();
+            let mut kb = open_keyboard(cli.model).map_err(|e| e.to_string())?;
+            let mut order: Vec<_> = kb.model().keys().iter().collect();
             order.sort_by_key(|k| (k.row, k.col));
             let stop = install_stop_handler();
             let step_dur = Duration::from_secs_f64(step.max(0.0));

@@ -53,7 +53,7 @@ where
 fn print_help() {
     println!(
         concat!(
-            "Origins 65 Lighting — Desktop lighting controller for HyperX Alloy Origins 65\n",
+            "Origins 65 Lighting — Desktop lighting controller for HyperX Alloy Origins 65 and Origins Core\n",
             "\n",
             "Usage: origins65-gui [OPTIONS]\n",
             "\n",
@@ -93,7 +93,7 @@ impl WindowController {
 
         let bounds = Bounds::centered(None, size(px(1260.0), px(820.0)), cx);
         let titlebar = TitlebarOptions {
-            title: Some("HyperX Alloy Origins 65 — Lighting Studio".into()),
+            title: Some("HyperX Alloy Origins — Lighting Studio".into()),
             ..Default::default()
         };
         let mut options = WindowOptions::default()

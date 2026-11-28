@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 pub use origins65::device::FullDeviceInfo as DeviceInfo;
+use origins65::model::Model;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RgbColor {
@@ -229,55 +230,17 @@ impl EffectKind {
         !matches!(self, Self::Solid)
     }
 
-    pub fn min_speed(self) -> u32 {
-        match self {
-            Self::Solid => 500,
-            Self::Breathing => 500,
-            Self::Cycle => 500,
-            Self::Wave => 1000,
-            Self::Swipe => 500,
-            Self::Confetti => 500,
-            Self::Sun => 500,
-            Self::Twilight => 300,
-            Self::Fade => 1000,
-            Self::Explosion => 600,
-            Self::Flame => 1000,
-            Self::Implosion => 5,
-        }
+    fn driver_kind(self) -> origins65::effects::EffectKind {
+        origins65::effects::EffectKind::from_name(self.cli_name()).expect("same effect names")
     }
 
-    pub fn max_speed(self) -> u32 {
-        match self {
-            Self::Solid => 3000,
-            Self::Breathing => 4000,
-            Self::Cycle => 4000,
-            Self::Wave => 6000,
-            Self::Swipe => 3000,
-            Self::Confetti => 3000,
-            Self::Sun => 1375,
-            Self::Twilight => 1000,
-            Self::Fade => 5000,
-            Self::Explosion => 10000,
-            Self::Flame => 12000,
-            Self::Implosion => 50,
-        }
+    /// NGENUITY's speed range on `model`: `(min, max, default)` ms.
+    pub fn speed_range(self, model: Model) -> (u32, u32, u32) {
+        model.speed_range(self.driver_kind())
     }
 
-    pub fn default_speed(self) -> u32 {
-        match self {
-            Self::Solid => 1000,
-            Self::Breathing => 2250,
-            Self::Cycle => 2250,
-            Self::Wave => 3000,
-            Self::Swipe => 2000,
-            Self::Confetti => 1000,
-            Self::Sun => 1000,
-            Self::Twilight => 1000,
-            Self::Fade => 2000,
-            Self::Explosion => 1000,
-            Self::Flame => 2000,
-            Self::Implosion => 20,
-        }
+    pub fn default_speed(self, model: Model) -> u32 {
+        self.speed_range(model).2
     }
 
     pub fn color_mode(self) -> ColorMode {
@@ -323,14 +286,21 @@ pub struct LayerConfig {
     pub direction: SwipeDirection,
     /// Empty means all keys.
     pub keys: BTreeSet<String>,
+    /// Keyboard the layer is edited for (speed ranges and key names differ).
+    pub model: Model,
 }
 
 impl LayerConfig {
     pub fn new(id: u64, effect: EffectKind) -> Self {
+        Self::for_model(id, effect, Model::Origins65)
+    }
+
+    pub fn for_model(id: u64, effect: EffectKind, model: Model) -> Self {
         Self {
+            model,
             id,
             effect,
-            speed: effect.default_speed(),
+            speed: effect.default_speed(model),
             color: RgbColor::new(242, 0, 0),
             colors: effect.default_colors(),
             random_color: false,
@@ -347,7 +317,7 @@ impl LayerConfig {
         }
         let prev_mode = self.effect.color_mode();
         self.effect = effect;
-        self.speed = effect.default_speed();
+        self.speed = effect.default_speed(self.model);
         match effect.color_mode() {
             ColorMode::List => {
                 if prev_mode != ColorMode::List || self.colors.is_empty() {
@@ -367,6 +337,19 @@ impl LayerConfig {
             }
             ColorMode::SingleOrRandom | ColorMode::None => {}
         }
+    }
+
+    /// Move the layer to another keyboard: keep the speed if it is still in range and drop key
+    /// names that keyboard does not have.
+    pub fn set_model(&mut self, model: Model) {
+        if self.model == model {
+            return;
+        }
+        let was_default = self.speed == self.effect.default_speed(self.model);
+        self.model = model;
+        let (min, max, default) = self.effect.speed_range(model);
+        self.speed = if was_default { default } else { self.speed.clamp(min, max) };
+        self.keys.retain(|name| model.key_by_name(name).is_some());
     }
 
     pub fn preview_color(&self) -> RgbColor {
@@ -398,8 +381,9 @@ impl LayerConfig {
         let mut opts: Vec<String> = Vec::new();
 
         if self.effect.uses_speed() {
-            let clamped = self.speed.clamp(self.effect.min_speed(), self.effect.max_speed());
-            if clamped != self.effect.default_speed() {
+            let (min, max, default) = self.effect.speed_range(self.model);
+            let clamped = self.speed.clamp(min, max);
+            if clamped != default {
                 opts.push(format!("speed={clamped}"));
             }
         }
@@ -548,6 +532,23 @@ mod tests {
         let mut exp = LayerConfig::new(3, EffectKind::Explosion);
         exp.random_color = true;
         assert_eq!(exp.to_cli_spec(), "explosion:color=random");
+    }
+
+    #[test]
+    fn layers_follow_the_keyboard_model() {
+        let mut wave = LayerConfig::new(1, EffectKind::Wave);
+        wave.speed = 8000; // clamped to the Origins 65 maximum when formatted
+        assert!(wave.to_cli_spec().starts_with("wave:speed=6000"));
+        wave.set_model(Model::OriginsCore);
+        assert_eq!(wave.speed, 8000);
+        assert!(wave.to_cli_spec().starts_with("wave:speed=8000"));
+
+        let mut flame = LayerConfig::new(2, EffectKind::Flame);
+        flame.keys.insert("w".into());
+        flame.keys.insert("lspace".into()); // Origins 65 only
+        flame.set_model(Model::OriginsCore);
+        assert_eq!(flame.speed, 1000); // default follows the model
+        assert_eq!(flame.keys.iter().collect::<Vec<_>>(), ["w"]);
     }
 
     #[test]

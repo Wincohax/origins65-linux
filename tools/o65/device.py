@@ -28,6 +28,7 @@ import select
 import time
 
 from .layout import NUM_LEDS
+from .models import ORIGINS65
 from .usb import UsbDev, find_device
 
 VID, PID = 0x03F0, 0x038F
@@ -76,7 +77,18 @@ class Profile:
                 f"fnlock_key={self.raw[15]} fnlock_color={self.raw[16:19].hex()}")
 
 
+def present():
+    try:
+        find_device(VID, PID)
+        return True
+    except RuntimeError:
+        return False
+
+
 class Origins65:
+    model = ORIGINS65
+    SLOTS = SLOTS
+
     def __init__(self):
         self.dev = UsbDev(find_device(VID, PID))
         self.dev.claim(INTERFACE)
@@ -122,6 +134,18 @@ class Origins65:
                 return out
             if not (len(rep) >= 2 and rep[0] == 5 and rep[1] == 0xAC):
                 out.append(rep)
+
+    def events(self, timeout=0.0):
+        """Parsed notifications: ("key", usage, pressed), ("brightness", percent), ("game_mode", on)."""
+        out = []
+        for rep in self.read_notifications(timeout):
+            if len(rep) >= 4 and rep[0] == 5 and rep[1] == 4:
+                out.append(("key", rep[2], rep[3] == 1))
+            elif len(rep) >= 3 and rep[0] == 5 and rep[1] == 8:
+                out.append(("brightness", round(rep[2] / 2.55)))
+            elif len(rep) >= 3 and rep[0] == 5 and rep[1] == 7:
+                out.append(("game_mode", rep[2] != 0))
+        return out
 
     def _wait_ack(self, timeout=0.5):  # NGENUITY HyperXDevice.IOTimeout = 500 ms
         if self.nfd is None:
@@ -267,6 +291,21 @@ class Origins65:
             trg[59] = trigger.get("speed", 128) & 0xFF
         self._packet(self._with_trailer(trg))
         self._commit()
+
+    def save_animation(self, slot, frames, trigger, activate, progress=None):
+        """Upload, store the slot number in the slot's own profile (as NGENUITY does) and make sure
+        the new animation shows. Returns a non-fatal note, or None."""
+        self.upload_animation(slot, frames, self.model.sync_interval, trigger, progress)
+        note = None
+        try:
+            prof = self.read_profile(slot=slot)
+            prof.slot = slot
+            self.write_profile(prof, slot=slot)
+        except Exception as e:  # noqa: BLE001
+            note = f"note: could not update slot {slot} profile ({e})"
+        if activate or self.active_slot() == slot:
+            self.select_slot(slot, force_reload=True)  # a showing slot must reload to play the new animation
+        return note
 
 
 def blank_frame():

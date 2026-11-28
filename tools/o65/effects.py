@@ -11,7 +11,8 @@ import math
 import random
 import time
 
-from .layout import KEYS, MAX_COL, MAX_ROW, NUM_LEDS
+from .layout import NUM_LEDS
+from .models import ORIGINS65
 
 RGB_RAINBOW = [(255, 0, 0), (255, 151, 0), (206, 255, 0), (50, 255, 0), (0, 255, 103),
                (0, 255, 255), (0, 104, 255), (43, 0, 255), (205, 0, 255), (255, 0, 158)]
@@ -39,11 +40,15 @@ class Effect:
     min_speed, max_speed, default_speed = 500, 3000, 1000
     triggered = False
 
-    def __init__(self, speed=None, color=None, colors=None, keys=None, opacity=100, random_color=False, **_):
+    def __init__(self, speed=None, color=None, colors=None, keys=None, opacity=100, random_color=False,
+                 model=None, **_):
+        self.model = model or ORIGINS65
+        # per-model speed range (instance attributes shadow the class defaults)
+        self.min_speed, self.max_speed, self.default_speed = self.model.speed_range(type(self))
         self.speed = int(speed or self.default_speed)
         self.colors = colors or ([color] if color else None)
         self.random_color = random_color
-        self.keys = [k for k in KEYS if keys is None or k.name in keys]
+        self.keys = [k for k in self.model.keys if keys is None or k.name in keys]
         self.opacity = opacity
         self.sync = False
         self.cycle_count = 1
@@ -158,7 +163,7 @@ class Wave(Effect):
         if len(cols) < 2:
             cols = cols * 2
         stops = [(0.5 / len(cols) + i / len(cols), c) for i, c in enumerate(cols)]
-        width = MAX_COL + 1
+        width = self.model.max_col + 1
         width += width // (len(stops) - 1)
         ang = self.angle / 180.0 * math.pi
         cx, cy = width // 2, 3.0
@@ -210,11 +215,11 @@ class Swipe(Effect):
         out = {}
         for k in self.keys:
             if self.direction in ("up", "down"):
-                n = MAX_ROW + 1
+                n = self.model.max_row + 1
                 edge = n - int(self.tp * n) if self.direction == "up" else int(self.tp * n)
                 inside = k.row < edge
             else:
-                n = MAX_COL + 1
+                n = self.model.max_col + 1
                 edge = n - int(self.tp * n) if self.direction == "left" else int(self.tp * n)
                 inside = k.col < edge
             out[k.led] = with_alpha(self.c2 if inside else self.c1, 1)
@@ -432,7 +437,7 @@ class Implosion(Trigger):
             return
         self.start = time.monotonic()
         self.ticks_fade = (self.speed / 5) / (20 / 5) * 100  # NGENUITY num2
-        self.radius = max(self.key.col, MAX_COL - self.key.col)
+        self.radius = max(self.key.col, self.model.max_col - self.key.col)
         self.hits = {}
         self.last_shrink = 0
 

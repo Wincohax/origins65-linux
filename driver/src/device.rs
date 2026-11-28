@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use nusb::transfer::{Control, ControlType, Recipient};
 use serde::{Deserialize, Serialize};
 
-use crate::effects::{EffectKind, Frame, Layer, MAX_SYNC_FRAMES, Rgb, SYNC_FPS, SYNC_INTERVAL, render_sync_frames, scale_frame};
+use crate::effects::{EffectKind, Frame, Layer, MAX_SYNC_FRAMES, Rgb, SYNC_INTERVAL, render_sync_frames, scale_frame};
+use crate::model::Model;
 
 pub const VID: u16 = 0x03F0;
 pub const PID: u16 = 0x038F;
@@ -36,7 +37,12 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Error returned by device discovery, USB I/O, or protocol validation.
 #[derive(Debug, Clone)]
 pub enum DeviceError {
+    /// The Origins 65 (`03f0:038f`) is not connected.
     NotFound,
+    /// The requested keyboard model is not connected.
+    ModelNotFound(Model),
+    /// None of the supported keyboards is connected.
+    NoKeyboard,
     Io(String),
     Protocol(String),
     InvalidArgument(String),
@@ -46,6 +52,11 @@ impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => write!(f, "{VID:04x}:{PID:04x} not found"),
+            Self::ModelNotFound(model) => write!(f, "{} not found", usb_id_list(*model, " or ")),
+            Self::NoKeyboard => {
+                let ids: Vec<String> = Model::ALL.iter().map(|m| usb_id_list(*m, ", ")).collect();
+                write!(f, "no supported keyboard found ({})", ids.join(", "))
+            }
             Self::Io(msg) => write!(f, "{msg}"),
             Self::Protocol(msg) => write!(f, "{msg}"),
             Self::InvalidArgument(msg) => write!(f, "{msg}"),
@@ -54,6 +65,15 @@ impl fmt::Display for DeviceError {
 }
 
 impl std::error::Error for DeviceError {}
+
+fn usb_id_list(model: Model, sep: &str) -> String {
+    model
+        .usb_ids()
+        .iter()
+        .map(|(v, p)| format!("{v:04x}:{p:04x}"))
+        .collect::<Vec<_>>()
+        .join(sep)
+}
 
 /// Low-level transport abstraction for USB interface 3 feature reports and interface 1 notifications.
 pub trait Transport: Send {
@@ -183,57 +203,62 @@ impl Transport for NusbTransport {
         let Some(ref file) = self.notif_file else {
             return Ok(None);
         };
-        let fd = file.as_raw_fd();
-        let deadline = Instant::now() + timeout;
+        read_hidraw(file, timeout)
+    }
+}
 
-        loop {
-            let rem = deadline.saturating_duration_since(Instant::now());
-            let timeout_ms = if timeout.is_zero() {
-                0
-            } else {
-                rem.as_millis().min(i32::MAX as u128) as i32
-            };
+/// Wait up to `timeout` (zero = don't wait) for one report on a non-blocking hidraw file.
+pub(crate) fn read_hidraw(file: &File, timeout: Duration) -> Result<Option<Vec<u8>>, DeviceError> {
+    let fd = file.as_raw_fd();
+    let deadline = Instant::now() + timeout;
 
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-            if rc < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    if Instant::now() >= deadline {
-                        return Ok(None);
-                    }
-                    continue;
-                }
-                return Err(DeviceError::Io(format!("hidraw poll failed: {err}")));
-            }
-            if rc == 0 {
-                return Ok(None);
-            }
-            if (pfd.revents & libc::POLLIN) == 0 {
-                return Ok(None);
-            }
+    loop {
+        let rem = deadline.saturating_duration_since(Instant::now());
+        let timeout_ms = if timeout.is_zero() {
+            0
+        } else {
+            rem.as_millis().min(i32::MAX as u128) as i32
+        };
 
-            let mut buf = [0u8; 64];
-            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                if Instant::now() >= deadline {
                     return Ok(None);
                 }
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(DeviceError::Io(format!("hidraw read failed: {err}")));
+                continue;
             }
-            if n == 0 {
+            return Err(DeviceError::Io(format!("hidraw poll failed: {err}")));
+        }
+        if rc == 0 {
+            return Ok(None);
+        }
+        if (pfd.revents & libc::POLLIN) == 0 {
+            return Ok(None);
+        }
+
+        let mut buf = [0u8; 64];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
                 return Ok(None);
             }
-            return Ok(Some(buf[..n as usize].to_vec()));
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(DeviceError::Io(format!("hidraw read failed: {err}")));
         }
+        if n == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(buf[..n as usize].to_vec()));
     }
 }
 
@@ -382,6 +407,7 @@ pub struct SlotProfileEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FullDeviceInfo {
+    pub model: Model,
     pub vid: String,
     pub pid: String,
     pub firmware: String,
@@ -406,10 +432,12 @@ pub struct PreparedSave {
     pub trigger: Option<OnboardTrigger>,
 }
 
-/// Validate layers for onboard storage, render the sync loop frames, and scale by `brightness_percent`.
+/// Validate layers for onboard storage, render the sync loop frames for `model`, and scale by
+/// `brightness_percent`.
 pub fn prepare_onboard_save(
     layers: &[Layer],
     brightness_percent: f64,
+    model: Model,
 ) -> Result<PreparedSave, String> {
     let looped: Vec<Layer> = layers
         .iter()
@@ -427,10 +455,10 @@ pub fn prepare_onboard_save(
                 t.kind.name()
             ));
         }
-        let min_sp = t.kind.min_speed() as f64;
-        let max_sp = t.kind.max_speed() as f64;
+        let (min_sp, max_sp, _) = t.model.speed_range(t.kind);
+        let (min_sp, max_sp) = (min_sp as f64, max_sp as f64);
         let clamped = (t.speed as f64).clamp(min_sp, max_sp);
-        let sp = ((clamped - min_sp) / (max_sp - min_sp) * 255.0) as u8;
+        let sp = ((clamped - min_sp) / (max_sp - min_sp) * model.trigger_speed_max()) as u8;
         let colors = match &t.colors {
             Some(cs) if !cs.is_empty() => cs.clone(),
             _ => vec![t.primary_color()],
@@ -445,7 +473,7 @@ pub fn prepare_onboard_save(
         None
     };
 
-    let raw_frames = render_sync_frames(&looped, SYNC_FPS, MAX_SYNC_FRAMES);
+    let raw_frames = render_sync_frames(&looped, model.sync_fps(), model.max_sync_frames());
     let scale = brightness_percent / 100.0;
     let frames: Vec<Frame> = raw_frames.iter().map(|f| scale_frame(f, scale)).collect();
 
@@ -720,6 +748,7 @@ impl<T: Transport> Origins65<T> {
             }
         }
         Ok(FullDeviceInfo {
+            model: Model::Origins65,
             vid: info.vid,
             pid: info.pid,
             firmware: info.firmware,

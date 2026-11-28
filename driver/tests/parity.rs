@@ -9,11 +9,14 @@ use origins65::device::{
     DeviceError, Notification, OnboardTrigger, Origins65, Profile, Transport,
     brightness_byte_to_percent, percent_to_brightness_byte, prepare_onboard_save,
 };
+use origins65::core::{HidTransport, OriginsCore};
 use origins65::effects::{
     EffectKind, Engine, Frame, MAX_SYNC_FRAMES, SYNC_FPS, SYNC_INTERVAL, parse_layer_spec,
-    render_sync_frames, scale_frame,
+    parse_layer_spec_for, render_sync_frames, scale_frame,
 };
+use origins65::keyboard::Keyboard;
 use origins65::layout::{KEYS, NUM_LEDS, key_by_name};
+use origins65::model::Model;
 
 #[derive(Deserialize)]
 struct RefKey {
@@ -51,7 +54,38 @@ struct RefProtocol {
 }
 
 #[derive(Deserialize)]
+struct RefTrigger {
+    kind: String,
+    colors: Vec<[u8; 3]>,
+    random: bool,
+    speed: u8,
+}
+
+#[derive(Deserialize)]
+struct RefCoreProtocol {
+    direct_frame: Vec<Vec<u8>>,
+    upload_slot0_no_trigger: Vec<Vec<u8>>,
+    upload_slot1_fade: Vec<Vec<u8>>,
+    upload_slot2_explosion_two_colour: Vec<Vec<u8>>,
+    upload_slot0_flame_random: Vec<Vec<u8>>,
+    select_slot_force_reload_active: Vec<Vec<u8>>,
+    set_brightness_50: Vec<Vec<u8>>,
+    profile_after_brightness: serde_json::Value,
+    device_info: serde_json::Value,
+    prepared_triggers: HashMap<String, RefTrigger>,
+}
+
+#[derive(Deserialize)]
+struct RefCore {
+    keys: Vec<RefKey>,
+    effect_lines: Vec<String>,
+    deterministic_cases: Vec<RefCase>,
+    protocol: RefCoreProtocol,
+}
+
+#[derive(Deserialize)]
 struct ReferenceDump {
+    core: RefCore,
     keys: Vec<RefKey>,
     effect_lines: Vec<String>,
     deterministic_cases: Vec<RefCase>,
@@ -541,11 +575,11 @@ fn layer_spec_validation_and_live_engine_triggers() {
     // Onboard validation: two triggers rejected, implosion rejected
     let l1 = parse_layer_spec("fade:color=ffffff").unwrap().0;
     let l2 = parse_layer_spec("explosion:color=ff0000").unwrap().0;
-    let err = prepare_onboard_save(&[l1.clone(), l2], 100.0).unwrap_err();
+    let err = prepare_onboard_save(&[l1.clone(), l2], 100.0, Model::Origins65).unwrap_err();
     assert!(err.contains("only one key-press effect"));
 
     let imp = parse_layer_spec("implosion:color=00ff00").unwrap().0;
-    let err = prepare_onboard_save(&[imp], 100.0).unwrap_err();
+    let err = prepare_onboard_save(&[imp], 100.0, Model::Origins65).unwrap_err();
     assert!(err.contains("implosion can't run onboard"));
 
     // Live engine: trigger overlays solid layer
@@ -558,4 +592,218 @@ fn layer_spec_validation_and_live_engine_triggers() {
     engine.key_pressed(w_key);
     assert_eq!(engine.active.len(), 1);
     let _after = engine.frame();
+}
+
+// ---- Alloy Origins Core (TKL) ---------------------------------------------------------------------
+
+/// Stands in for the hidraw node: records payloads and answers every command that expects a reply
+/// (same rules as `MockCore` in dump_reference.py).
+struct MockHid {
+    sent: Vec<[u8; 64]>,
+    replies: VecDeque<Vec<u8>>,
+    values: HashMap<u8, Vec<(usize, u8)>>,
+}
+
+impl MockHid {
+    fn new(values: &[(u8, &[(usize, u8)])]) -> Self {
+        Self {
+            sent: Vec::new(),
+            replies: VecDeque::new(),
+            values: values.iter().map(|&(c, v)| (c, v.to_vec())).collect(),
+        }
+    }
+
+    fn sent_as_vecs(&self) -> Vec<Vec<u8>> {
+        self.sent.iter().map(|b| b.to_vec()).collect()
+    }
+}
+
+impl HidTransport for MockHid {
+    fn write_report(&mut self, payload: &[u8; 64]) -> Result<(), DeviceError> {
+        self.sent.push(*payload);
+        if !matches!(payload[0], 0x95 | 0xA2 | 0xA4) {
+            let mut rep = vec![0u8; 64];
+            rep[0] = payload[0];
+            for &(i, v) in self.values.get(&payload[0]).map(Vec::as_slice).unwrap_or(&[]) {
+                rep[i] = v;
+            }
+            self.replies.push_back(rep);
+        }
+        Ok(())
+    }
+
+    fn read_report(&mut self, _timeout: Duration) -> Result<Option<Vec<u8>>, DeviceError> {
+        Ok(self.replies.pop_front())
+    }
+}
+
+fn mock_core(values: &[(u8, &[(usize, u8)])]) -> OriginsCore<MockHid> {
+    let mut kb = OriginsCore::with_transport(MockHid::new(values), 0x03F0, 0x098F, 0x0106);
+    kb.set_timeouts(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    kb
+}
+
+const CORE_PRESET_ID: [u8; 16] = [
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+];
+
+#[test]
+fn core_layout_and_effect_listing_match_python() {
+    let reference = load_reference();
+    let keys = Model::OriginsCore.keys();
+    assert_eq!(keys.len(), reference.core.keys.len());
+    for (rust_k, py_k) in keys.iter().zip(reference.core.keys.iter()) {
+        assert_eq!(
+            (rust_k.name, rust_k.usage, rust_k.row, rust_k.col, rust_k.led),
+            (py_k.name.as_str(), py_k.usage, py_k.row, py_k.col, py_k.led)
+        );
+    }
+    let lines: Vec<String> = EffectKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let kind_str = match (kind.is_triggered(), kind.onboard_trigger_code()) {
+                (false, _) => "looped",
+                (true, Some(_)) => "key-press (onboard ok)",
+                (true, None) => "key-press (live only)",
+            };
+            let (min, max, default) = Model::OriginsCore.speed_range(kind);
+            format!("{:<10} {:<22} speed {min}-{max} ms, default {default}", kind.name(), kind_str)
+        })
+        .collect();
+    assert_eq!(lines, reference.core.effect_lines);
+}
+
+#[test]
+fn core_sync_frames_match_python() {
+    let reference = load_reference();
+    for case in &reference.core.deterministic_cases {
+        let layers: Vec<_> = case
+            .specs
+            .iter()
+            .map(|s| parse_layer_spec_for(s, Model::OriginsCore).expect("parse layer").0)
+            .filter(|l| !l.is_triggered())
+            .collect();
+        let frames = prepare_onboard_save(&layers, case.brightness, Model::OriginsCore)
+            .expect("prepare")
+            .frames;
+        assert_eq!(frames.len(), case.frames.len(), "frame count for '{}'", case.name);
+        for (fi, (rust_frame, py_frame)) in frames.iter().zip(case.frames.iter()).enumerate() {
+            let py: Vec<(u8, u8, u8)> = py_frame.iter().map(|&[r, g, b]| (r, g, b)).collect();
+            assert_eq!(rust_frame.to_vec(), py, "case '{}' frame {fi}", case.name);
+        }
+    }
+}
+
+#[test]
+fn core_protocol_packets_match_python() {
+    let reference = load_reference();
+    let proto = &reference.core.protocol;
+    let interval = Model::OriginsCore.sync_interval();
+
+    let mut frame: Frame = [(0, 0, 0); NUM_LEDS];
+    let mut f0: Frame = [(0, 0, 0); NUM_LEDS];
+    let mut f1: Frame = [(0, 0, 0); NUM_LEDS];
+    for i in 0..NUM_LEDS {
+        frame[i] = (((i * 7) & 0xFF) as u8, ((i * 13) & 0xFF) as u8, ((i * 29) & 0xFF) as u8);
+        f0[i] = (((i * 3) & 0xFF) as u8, ((i * 5) & 0xFF) as u8, ((i * 11) & 0xFF) as u8);
+        f1[i] = (((255 - i) & 0xFF) as u8, ((i * 2) & 0xFF) as u8, ((i * 4) & 0xFF) as u8);
+    }
+
+    let mut kb = mock_core(&[]);
+    kb.send_direct_frame(&frame).unwrap();
+    assert_eq!(kb.transport().sent_as_vecs(), proto.direct_frame);
+
+    let trig = |kind, colors: Vec<(u8, u8, u8)>, random, speed| OnboardTrigger {
+        kind,
+        colors,
+        random,
+        speed,
+    };
+    let uploads = [
+        (0u8, vec![f0, f1], None, &proto.upload_slot0_no_trigger),
+        (
+            1,
+            vec![f0],
+            Some(trig(EffectKind::Fade, vec![(10, 20, 30)], false, 20)),
+            &proto.upload_slot1_fade,
+        ),
+        (
+            2,
+            vec![f1, f0],
+            Some(trig(EffectKind::Explosion, vec![(255, 0, 128), (0, 255, 64)], false, 63)),
+            &proto.upload_slot2_explosion_two_colour,
+        ),
+        (
+            0,
+            vec![f1],
+            Some(trig(EffectKind::Flame, vec![(242, 0, 0)], true, 5)),
+            &proto.upload_slot0_flame_random,
+        ),
+    ];
+    for (slot, frames, trigger, expected) in uploads {
+        let mut kb = mock_core(&[]);
+        let mut steps = 0;
+        kb.upload_animation(slot, &frames, interval, trigger.as_ref(), Some(CORE_PRESET_ID), |_, _| {
+            steps += 1
+        })
+        .unwrap();
+        assert_eq!(steps, frames.len() * 7);
+        assert_eq!(kb.transport().sent_as_vecs(), *expected, "upload to slot {slot}");
+    }
+
+    let mut kb = mock_core(&[(0x15, &[(4, 2)])]);
+    kb.select_slot(1, true).unwrap();
+    assert_eq!(kb.transport().sent_as_vecs(), proto.select_slot_force_reload_active);
+
+    let mut kb = mock_core(&[(0x15, &[(4, 2)]), (0x27, &[(4, 127)]), (0x14, &[(4, 1), (6, 1), (8, 1)])]);
+    let prof = kb.set_brightness(50).unwrap();
+    assert_eq!(kb.transport().sent_as_vecs(), proto.set_brightness_50);
+    assert_eq!(serde_json::to_value(prof.to_info()).unwrap(), proto.profile_after_brightness);
+
+    let mut kb = mock_core(&[(0x10, &[(56, 9)])]);
+    assert_eq!(serde_json::to_value(kb.device_info().unwrap()).unwrap(), proto.device_info);
+
+    for (spec, expected) in &proto.prepared_triggers {
+        let (layer, _) = parse_layer_spec_for(spec, Model::OriginsCore).unwrap();
+        let t = prepare_onboard_save(&[layer], 100.0, Model::OriginsCore)
+            .unwrap()
+            .trigger
+            .expect("trigger");
+        assert_eq!(t.kind.name(), expected.kind, "{spec}");
+        let colors: Vec<[u8; 3]> = t.colors.iter().map(|&(r, g, b)| [r, g, b]).collect();
+        assert_eq!(colors, expected.colors, "{spec}");
+        assert_eq!((t.random, t.speed), (expected.random, expected.speed), "{spec}");
+    }
+}
+
+#[test]
+fn core_events_and_trait_dispatch() {
+    // Fn held + Up: key events, then the brightness read back NGENUITY does.
+    let mut kb = mock_core(&[(0x27, &[(4, 191)])]);
+    let fn_down = {
+        let mut r = vec![0u8; 64];
+        r[0] = 0x73;
+        r[4] = 0xE8;
+        r[5] = 1;
+        r
+    };
+    let mut up = fn_down.clone();
+    up[4] = 0x52;
+    let mut game = vec![0u8; 64];
+    game[0] = 0x71;
+    game[4] = 1;
+    kb.transport_mut().replies.extend([fn_down, up, game]);
+    let kb: &mut dyn Keyboard = &mut kb;
+    assert_eq!(kb.model(), Model::OriginsCore);
+    let events = kb.poll_events(Duration::ZERO).unwrap();
+    assert_eq!(
+        events,
+        vec![
+            Notification::KeyEvent { usage: 0xE8, pressed: true },
+            Notification::KeyEvent { usage: 0x52, pressed: true },
+            Notification::BrightnessChanged { level: 191, percent: 75 },
+            Notification::GameMode(true),
+        ]
+    );
+    assert_eq!(Model::OriginsCore.key_by_usage(0x52).map(|k| k.name), Some("up"));
 }

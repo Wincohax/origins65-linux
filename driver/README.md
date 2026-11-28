@@ -4,10 +4,15 @@ Pure-Rust Linux lighting driver library and CLI for the HyperX Alloy Origins 65 
 
 ## Architecture
 
-- **`driver/src/layout.rs`**: US 67-key + 2 outer spacebar LED layout (`69` LEDs mapped into `80` wire slots), HID usages, grid coordinates, and name/usage lookups.
-- **`driver/src/effects.rs`**: Exact port of the NGENUITY 2.39 software effect engine (`TimePosition` live and sync timing, layer compositing with alpha/opacity, all 8 looped effects and 4 key-press trigger effects, `Engine`, `render_sync_frames`, and CLI layer-spec parsing).
-- **`driver/src/device.rs`**: USB/HID command protocol over a mockable `Transport` trait, with `NusbTransport` (`nusb` 0.1 pure-Rust usbfs control transfers on USB interface 3 + non-blocking `/dev/hidraw*` polling on interface 1 for ACKs, key events, and Fn brightness notifications).
-- **`driver/src/main.rs`**: Drop-in `clap` CLI replacement for `tools/origins65.py`.
+- **`driver/src/model.rs`**: the supported keyboards (`Model::Origins65`, `Model::OriginsCore`): USB IDs,
+  key layout, onboard frame limits and NGENUITY's per-model effect speed ranges.
+- **`driver/src/layout.rs`**: key tables. Origins 65: US 67-key + 2 outer spacebar LEDs (`69` LEDs in `80`
+  wire slots). Origins Core: US 87-key TKL. Frames are `NUM_LEDS = 96` slots for every model.
+- **`driver/src/effects.rs`**: Exact port of the NGENUITY 2.39 software effect engine (`TimePosition` live and sync timing, layer compositing with alpha/opacity, all 8 looped effects and 4 key-press trigger effects, `Engine`, `render_sync_frames`, and CLI layer-spec parsing). Layers carry their `Model`.
+- **`driver/src/device.rs`**: Origins 65 USB/HID command protocol over a mockable `Transport` trait, with `NusbTransport` (`nusb` 0.1 pure-Rust usbfs control transfers on USB interface 3 + non-blocking `/dev/hidraw*` polling on interface 1 for ACKs, key events, and Fn brightness notifications).
+- **`driver/src/core.rs`**: Origins Core (TKL) protocol over a mockable `HidTransport` (hidraw on interface 2). Experimental: written from NGENUITY, not yet tried on hardware; see `docs/origins-core-protocol.md`.
+- **`driver/src/keyboard.rs`**: the `Keyboard` trait both drivers implement, plus `open_keyboard` / `detect_model`.
+- **`driver/src/main.rs`**: Drop-in `clap` CLI replacement for `tools/origins65.py`; `--model` overrides detection.
 
 ## Building
 

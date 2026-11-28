@@ -14,15 +14,17 @@ use std::time::Instant;
 
 use rand::Rng;
 
-use crate::layout::{KEYS, Key, MAX_COL, MAX_ROW, NUM_LEDS, key_by_name};
+use crate::layout::{Key, NUM_LEDS};
+use crate::model::Model;
 
 pub type Rgb = (u8, u8, u8);
 pub type Rgba = (u8, u8, u8, f64);
 pub type Frame = [Rgb; NUM_LEDS];
 
-pub const SYNC_FPS: u32 = 20;
-pub const SYNC_INTERVAL: u8 = (1000 / SYNC_FPS - 16) as u8;
-pub const MAX_SYNC_FRAMES: usize = 120;
+/// Origins 65 onboard playback rate; see [`Model::sync_fps`] for other keyboards.
+pub const SYNC_FPS: u32 = Model::Origins65.sync_fps();
+pub const SYNC_INTERVAL: u8 = Model::Origins65.sync_interval();
+pub const MAX_SYNC_FRAMES: usize = Model::Origins65.max_sync_frames();
 
 pub const RGB_RAINBOW: [Rgb; 10] = [
     (255, 0, 0),
@@ -269,11 +271,17 @@ pub struct LayerParams {
     pub random_color: bool,
     pub angle: f64,
     pub direction: SwipeDirection,
+    pub model: Model,
 }
 
 impl LayerParams {
     pub fn new(kind: EffectKind) -> Self {
+        Self::for_model(kind, Model::Origins65)
+    }
+
+    pub fn for_model(kind: EffectKind, model: Model) -> Self {
         Self {
+            model,
             kind,
             speed: None,
             color: None,
@@ -291,8 +299,14 @@ impl LayerParams {
 /// `"solid:color=ff0000,keys=w+a+s+d"`.
 ///
 /// Returns `(Layer, Option<warning_note>)` where `warning_note` is populated if `speed` lies
-/// outside NGENUITY's standard speed range for that effect.
+/// outside NGENUITY's standard speed range for that effect. Keys and speeds are those of the
+/// Origins 65; use [`parse_layer_spec_for`] for another keyboard.
 pub fn parse_layer_spec(spec: &str) -> Result<(Layer, Option<String>), String> {
+    parse_layer_spec_for(spec, Model::Origins65)
+}
+
+/// [`parse_layer_spec`] for a given keyboard model (key names and speed ranges differ).
+pub fn parse_layer_spec_for(spec: &str, model: Model) -> Result<(Layer, Option<String>), String> {
     let (name_raw, rest) = match spec.split_once(':') {
         Some((n, r)) => (n, r),
         None => (spec, ""),
@@ -301,7 +315,7 @@ pub fn parse_layer_spec(spec: &str) -> Result<(Layer, Option<String>), String> {
     let kind = EffectKind::from_name(&name)
         .ok_or_else(|| format!("unknown effect '{name}'; run `origins65 effects`"))?;
 
-    let mut params = LayerParams::new(kind);
+    let mut params = LayerParams::for_model(kind, model);
     let mut explicit_speed: Option<i64> = None;
 
     for item in rest.split(',').filter(|s| !s.is_empty()) {
@@ -329,7 +343,7 @@ pub fn parse_layer_spec(spec: &str) -> Result<(Layer, Option<String>), String> {
                 let names: Vec<String> = v.split('+').map(|n| n.to_ascii_lowercase()).collect();
                 let bad: Vec<&str> = names
                     .iter()
-                    .filter(|n| key_by_name(n).is_none())
+                    .filter(|n| model.key_by_name(n).is_none())
                     .map(String::as_str)
                     .collect();
                 if !bad.is_empty() {
@@ -377,14 +391,15 @@ pub fn parse_layer_spec(spec: &str) -> Result<(Layer, Option<String>), String> {
         }
     }
 
+    let (min_speed, max_speed, _) = model.speed_range(kind);
     let warning = explicit_speed.and_then(|sp| {
-        if sp < kind.min_speed() as i64 || sp > kind.max_speed() as i64 {
+        if sp < min_speed as i64 || sp > max_speed as i64 {
             Some(format!(
                 "note: {} speed {} is outside NGENUITY's range {}..{} ms",
                 kind.name(),
                 sp,
-                kind.min_speed(),
-                kind.max_speed()
+                min_speed,
+                max_speed
             ))
         } else {
             None
@@ -484,6 +499,7 @@ enum EffectState {
 
 #[derive(Debug, Clone)]
 pub struct Layer {
+    pub model: Model,
     pub kind: EffectKind,
     pub speed: u32,
     pub colors: Option<Vec<Rgb>>,
@@ -505,14 +521,16 @@ impl Layer {
     pub fn from_params(params: LayerParams) -> Self {
         let speed = match params.speed {
             Some(s) if s > 0 => s,
-            _ => params.kind.default_speed(),
+            _ => params.model.default_speed(params.kind),
         };
         let colors = match (params.colors, params.color) {
             (Some(cs), _) if !cs.is_empty() => Some(cs),
             (_, Some(c)) => Some(vec![c]),
             _ => None,
         };
-        let keys: Vec<&'static Key> = KEYS
+        let keys: Vec<&'static Key> = params
+            .model
+            .keys()
             .iter()
             .filter(|k| match &params.keys {
                 None => true,
@@ -550,6 +568,7 @@ impl Layer {
         };
 
         let mut layer = Self {
+            model: params.model,
             kind: params.kind,
             speed,
             colors,
@@ -690,7 +709,7 @@ impl Layer {
                 *done = false;
                 *start = Instant::now();
                 *ticks_fade = (self.speed as f64 / 5.0) / (20.0 / 5.0) * 100.0;
-                *radius = (key.col as i32).max(MAX_COL as i32 - key.col as i32);
+                *radius = (key.col as i32).max(self.model.max_col() as i32 - key.col as i32);
                 hits.clear();
                 *last_shrink = 0.0;
             }
@@ -747,13 +766,14 @@ impl Layer {
                 done: false,
                 start: now,
                 ticks_fade: (self.speed as f64 / 5.0) / (20.0 / 5.0) * 100.0,
-                radius: (key.col as i32).max(MAX_COL as i32 - key.col as i32),
+                radius: (key.col as i32).max(self.model.max_col() as i32 - key.col as i32),
                 hits: HashMap::new(),
                 last_shrink: 0.0,
             },
             _ => EffectState::TriggerTemplate,
         };
         let mut inst = Layer {
+            model: self.model,
             kind: self.kind,
             speed: self.speed,
             colors: self.colors.clone(),
@@ -879,7 +899,7 @@ impl Layer {
                     .enumerate()
                     .map(|(i, &c)| (0.5 / (len as f64) + (i as f64) / (len as f64), c))
                     .collect();
-                let mut width = (MAX_COL as i32) + 1;
+                let mut width = (self.model.max_col() as i32) + 1;
                 width += width / ((stops.len() as i32) - 1);
                 let ang = *angle / 180.0 * PI;
                 let cx = (width / 2) as f64;
@@ -933,7 +953,7 @@ impl Layer {
                 for k in &self.keys {
                     let inside = match direction {
                         SwipeDirection::Up | SwipeDirection::Down => {
-                            let n = (MAX_ROW as i32) + 1;
+                            let n = (self.model.max_row() as i32) + 1;
                             let step = (tp * (n as f64)) as i32;
                             let edge = if *direction == SwipeDirection::Up {
                                 n - step
@@ -943,7 +963,7 @@ impl Layer {
                             (k.row as i32) < edge
                         }
                         SwipeDirection::Left | SwipeDirection::Right => {
-                            let n = (MAX_COL as i32) + 1;
+                            let n = (self.model.max_col() as i32) + 1;
                             let step = (tp * (n as f64)) as i32;
                             let edge = if *direction == SwipeDirection::Left {
                                 n - step
