@@ -3,3 +3,8 @@
 SUBSYSTEM=="usb", ATTR{idVendor}=="03f0", ATTR{idProduct}=="038f", TAG+="uaccess"
 # hidraw nodes: key-press and brightness notifications come from interface 1.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="038f", TAG+="uaccess"
+
+# HyperX Alloy Origins Core TKL (03f0:098f HP, 0951:16e6 Kingston): everything goes through the
+# hidraw node of interface 2.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="098f", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e6", TAG+="uaccess"

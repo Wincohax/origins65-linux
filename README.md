@@ -6,7 +6,8 @@
 
 <p align="center">
   RGB lighting control for the <b>HyperX Alloy Origins 65</b> keyboard on Linux.<br>
-  Everything NGENUITY's lighting page does, without Windows.
+  Everything NGENUITY's lighting page does, without Windows.<br>
+  <sub>Experimental: also supports the <b>Alloy Origins Core</b> (TKL).</sub>
 </p>
 
 ---
@@ -24,6 +25,18 @@
 
 The keyboard's own `Fn` brightness keys keep working while the app is running.
 
+### Alloy Origins Core (TKL): experimental
+
+The tenkeyless Alloy Origins Core (`03f0:098f` or `0951:16e6`) is supported too: same effects, same app,
+detected automatically. **Nobody has tried it on a real keyboard yet.** It speaks a different protocol
+from the Origins 65, and that protocol was worked out from NGENUITY alone (details in
+[`docs/origins-core-protocol.md`](docs/origins-core-protocol.md)). If you have one, please report what
+works and what doesn't. Differences from the Origins 65:
+
+- Saved animations hold up to 100 frames at 25 fps (a 4-second loop).
+- NGENUITY's speed ranges differ for wave (up to 9 s), explosion (0.5-3 s) and flame (0.8-1.5 s).
+- Only the US 87-key layout is mapped; ISO and JIS keyboards may light the wrong keys.
+
 ## Getting started
 
 ### 1. Let your user talk to the keyboard (one time)
@@ -35,6 +48,8 @@ unplug and replug the keyboard:
 sudo tee /etc/udev/rules.d/60-origins65.rules <<'EOF'
 SUBSYSTEM=="usb", ATTR{idVendor}=="03f0", ATTR{idProduct}=="038f", TAG+="uaccess"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="038f", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="098f", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e6", TAG+="uaccess"
 EOF
 sudo udevadm control --reload && sudo udevadm trigger
 ```
@@ -63,14 +78,17 @@ Add the AppImage to your desktop's autostart list with the `--background` option
 - **No tray?** On desktops without a system tray (for example GNOME without the AppIndicator extension),
   closing the window simply quits the app.
 - Tested with firmware 21.04 on the US 67-key layout. Other layouts may light the wrong keys.
+- If both keyboards are plugged in, the Origins 65 is used. Pick one with `--model origins65` or
+  `--model origins-core` on the command line.
 
 ## Troubleshooting
 
 | Problem | Try this |
 |---|---|
-| "03f0:038f not found" | Check the keyboard is plugged in directly (not through a KVM switch). |
+| "no supported keyboard found" | Check the keyboard is plugged in directly (not through a KVM switch). |
 | A "permission denied" error | Make sure you did step 1, then unplug and replug the keyboard. |
 | "failed to claim USB interface 3" | Another copy of the app or the command-line tool is running. Quit it first. |
+| Origins Core: "keyboard stopped answering" | Please open an issue with the output of `origins65 info`: the protocol may differ on your firmware. |
 | The tray icon doesn't show up | Your desktop may not have a system tray. On GNOME, install the *AppIndicator and KStatusNotifierItem Support* extension. |
 
 ## Command-line tool
@@ -104,7 +122,8 @@ cargo build -p origins65 --release      # → target/release/origins65
 
 The desktop app also needs a few system development libraries; see [`gui/README.md`](gui/README.md).
 Developer notes for the driver library and its tests are in [`driver/README.md`](driver/README.md), and the
-USB protocol is documented in [`docs/origins65-protocol.md`](docs/origins65-protocol.md).
+USB protocols are documented in [`docs/origins65-protocol.md`](docs/origins65-protocol.md) and
+[`docs/origins-core-protocol.md`](docs/origins-core-protocol.md).
 
 ### Building the AppImage
 
@@ -119,7 +138,7 @@ The first run downloads linuxdeploy and appimagetool into `~/.cache/appimage-too
 ## About
 
 This is an independent project, not affiliated with HP or HyperX. The lighting protocol was worked out by
-studying how NGENUITY 2.39 talks to the keyboard.
+studying how NGENUITY 2.39 talks to the keyboards.
 
 ## License
 

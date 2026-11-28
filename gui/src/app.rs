@@ -6,10 +6,11 @@ use gpui::{
     SharedString, Stateful, Task, Window, div, prelude::*, px, relative, rgb, rgba,
 };
 
+use origins65::model::Model;
 use crate::driver::{DriverClient, DriverCommand, DriverEvent};
 use crate::layout::{
-    KEYBOARD_ROWS, PRESET_ALPHAS, PRESET_ARROWS, PRESET_MODIFIERS, PRESET_NAV, PRESET_NUMBERS,
-    PRESET_WASD, all_key_names,
+    PRESET_ALPHAS, PRESET_ARROWS, PRESET_MODIFIERS, PRESET_NAV, PRESET_NUMBERS, PRESET_WASD,
+    all_key_names_for, layout_title, layout_width_units, rows_for,
 };
 use crate::model::{
     ColorMode, DeviceInfo, EffectKind, LayerConfig, RgbColor, SWATCH_COLORS, SwipeDirection,
@@ -166,6 +167,10 @@ impl Origins65App {
                 self.busy_message = msg;
             }
             DriverEvent::InfoLoaded(Ok(info)) => {
+                // Layers are edited for the connected keyboard (key names, speed ranges).
+                for layer in &mut self.layers {
+                    layer.set_model(info.model);
+                }
                 self.hw_brightness = info.current.brightness_percent;
                 self.save_slot = info.current.slot.min(2);
                 self.device_info = Some(info);
@@ -340,7 +345,7 @@ impl Origins65App {
     fn add_layer(&mut self, effect: EffectKind, cx: &mut Context<Self>) {
         let id = self.next_layer_id;
         self.next_layer_id += 1;
-        let layer = LayerConfig::new(id, effect);
+        let layer = LayerConfig::for_model(id, effect, self.kb_model());
         self.layers.insert(0, layer);
         self.selected_layer_idx = 0;
         self.selected_color_idx = 0;
@@ -419,12 +424,18 @@ impl Origins65App {
         cx.notify();
     }
 
+    /// The connected keyboard (the Origins 65 until its info has been read).
+    fn kb_model(&self) -> Model {
+        self.device_info.as_ref().map(|d| d.model).unwrap_or_default()
+    }
+
     fn invert_keys(&mut self, cx: &mut Context<Self>) {
+        let model = self.kb_model();
         if let Some(layer) = self.selected_layer_mut() {
             if layer.keys.is_empty() {
                 return;
             }
-            let next: BTreeSet<String> = all_key_names()
+            let next: BTreeSet<String> = all_key_names_for(model)
                 .into_iter()
                 .filter(|k| !layer.keys.contains(*k))
                 .map(|k| k.to_string())
@@ -549,7 +560,7 @@ impl Origins65App {
                                     .text_base()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(rgb(TEXT_PRIMARY))
-                                    .child("HyperX Alloy Origins 65"),
+                                    .child(self.kb_model().name()),
                             )
                             .child(
                                 div()
@@ -1444,8 +1455,7 @@ impl Origins65App {
         };
 
         let entity = cx.entity();
-        let min_s = layer.effect.min_speed();
-        let max_s = layer.effect.max_speed();
+        let (min_s, max_s, _) = layer.effect.speed_range(layer.model);
         let speed_span = (max_s - min_s).max(1) as f32;
         let speed_frac = ((layer.speed.clamp(min_s, max_s) - min_s) as f32) / speed_span;
         let opacity_frac = layer.opacity as f32 / 100.0;
@@ -1559,7 +1569,7 @@ impl Origins65App {
                                             .child("Reset")
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 if let Some(l) = app.selected_layer_mut() {
-                                                    l.speed = l.effect.default_speed();
+                                                    l.speed = l.effect.default_speed(l.model);
                                                 }
                                                 app.restart_live_if_running();
                                                 cx.notify();
@@ -2216,14 +2226,19 @@ impl Origins65App {
 
         let all_selected = layer.keys.is_empty();
         let tint = layer.preview_color();
-        let key_unit = 44.0_f32;
+        let model = self.kb_model();
+        // Same overall width for every model: the 16u Origins 65 at 44 px per key.
+        let key_unit = 44.0_f32 * 16.0 / layout_width_units(model);
         let gap_px = 4.0_f32;
+        let led_count = model.keys().len();
 
         let summary = if all_selected {
-            "All 69 LEDs active (no key restriction). Click any key to restrict this layer.".into()
+            format!(
+                "All {led_count} LEDs active (no key restriction). Click any key to restrict this layer."
+            )
         } else {
             format!(
-                "{} / 69 LEDs selected. Click keys to toggle, or click \"All Keys\" to clear restriction.",
+                "{} / {led_count} LEDs selected. Click keys to toggle, or click \"All Keys\" to clear restriction.",
                 layer.keys.len()
             )
         };
@@ -2249,7 +2264,7 @@ impl Origins65App {
             .border_1()
             .border_color(rgb(BORDER_SUBTLE));
 
-        for (r_idx, row) in KEYBOARD_ROWS.iter().enumerate() {
+        for (r_idx, row) in rows_for(model).iter().enumerate() {
             let mut row_div = div()
                 .id(("kb-row", r_idx))
                 .flex()
@@ -2258,7 +2273,10 @@ impl Origins65App {
 
             for (k_idx, key) in row.iter().enumerate() {
                 if key.gap_before > 0.0 {
-                    row_div = row_div.child(div().w(px(key.gap_before * key_unit)));
+                    // A g-unit gap takes the room of g keys, flex gaps included, so the columns
+                    // after it line up across rows.
+                    let w = (key.gap_before * (key_unit + gap_px) - gap_px).max(0.0);
+                    row_div = row_div.child(div().w(px(w)));
                 }
 
                 let is_lit = all_selected || layer.keys.contains(key.name);
@@ -2315,7 +2333,7 @@ impl Origins65App {
             kb_rows = kb_rows.child(row_div);
         }
 
-        panel_box("KEYBOARD KEY MASK (HYPERX ALLOY ORIGINS 65 — US 67-KEY)")
+        panel_box(layout_title(model))
             .child(
                 div()
                     .flex()

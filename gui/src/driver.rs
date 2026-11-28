@@ -6,9 +6,10 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use origins65::device::{DeviceError, Notification, Origins65, Transport, prepare_onboard_save};
-use origins65::effects::{Engine, SYNC_FPS, parse_layer_spec, scale_frame};
-use origins65::layout::key_by_usage;
+use origins65::device::{DeviceError, Notification, prepare_onboard_save};
+use origins65::effects::{Engine, parse_layer_spec_for, scale_frame};
+use origins65::keyboard::{Keyboard, open_keyboard};
+use origins65::model::Model;
 
 use crate::model::DeviceInfo;
 
@@ -57,8 +58,8 @@ pub enum DriverEvent {
     SaveFinished(Result<String, String>),
 }
 
-/// Owns the single dedicated keyboard device thread (`Origins65`) so all USB interface 3 I/O
-/// and the live rendering loop run in-process without contending for the device.
+/// Owns the single dedicated keyboard device thread so all keyboard I/O and the live rendering
+/// loop run in-process without contending for the device. Works with any supported model.
 pub struct DriverClient {
     cmd_tx: Sender<DriverCommand>,
     shutdown_flag: Arc<AtomicBool>,
@@ -67,13 +68,12 @@ pub struct DriverClient {
 
 impl DriverClient {
     pub fn spawn() -> (Self, Receiver<DriverEvent>) {
-        Self::spawn_with_opener(Origins65::open)
+        Self::spawn_with_opener(|| open_keyboard(None))
     }
 
-    pub fn spawn_with_opener<T, F>(opener: F) -> (Self, Receiver<DriverEvent>)
+    pub fn spawn_with_opener<F>(opener: F) -> (Self, Receiver<DriverEvent>)
     where
-        T: Transport + 'static,
-        F: FnMut() -> Result<Origins65<T>, DeviceError> + Send + 'static,
+        F: FnMut() -> Result<Box<dyn Keyboard>, DeviceError> + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<DriverCommand>();
         let (evt_tx, evt_rx) = mpsc::channel::<DriverEvent>();
@@ -123,13 +123,11 @@ struct LiveSession {
     next_tick: Instant,
 }
 
-fn ensure_device<'a, T, F>(
-    dev: &'a mut Option<Origins65<T>>,
-    opener: &mut F,
-) -> Result<&'a mut Origins65<T>, String>
+type Device = Box<dyn Keyboard>;
+
+fn ensure_device<'a, F>(dev: &'a mut Option<Device>, opener: &mut F) -> Result<&'a mut Device, String>
 where
-    T: Transport,
-    F: FnMut() -> Result<Origins65<T>, DeviceError>,
+    F: FnMut() -> Result<Device, DeviceError>,
 {
     if dev.is_none() {
         let opened = opener().map_err(|e| e.to_string())?;
@@ -138,18 +136,13 @@ where
     Ok(dev.as_mut().expect("device just opened"))
 }
 
-fn run_device_op<T, F, R, Op>(
-    dev: &mut Option<Origins65<T>>,
-    opener: &mut F,
-    op: Op,
-) -> Result<R, String>
+fn run_device_op<F, R, Op>(dev: &mut Option<Device>, opener: &mut F, op: Op) -> Result<R, String>
 where
-    T: Transport,
-    F: FnMut() -> Result<Origins65<T>, DeviceError>,
-    Op: FnOnce(&mut Origins65<T>) -> Result<R, DeviceError>,
+    F: FnMut() -> Result<Device, DeviceError>,
+    Op: FnOnce(&mut dyn Keyboard) -> Result<R, DeviceError>,
 {
     let kb = ensure_device(dev, opener)?;
-    match op(kb) {
+    match op(kb.as_mut()) {
         Ok(val) => Ok(val),
         Err(err) => {
             // Drop the handle so a disconnect or USB error recovers cleanly on next command.
@@ -159,8 +152,8 @@ where
     }
 }
 
-fn tick_live<T: Transport>(
-    dev: &mut Option<Origins65<T>>,
+fn tick_live(
+    dev: &mut Option<Device>,
     live: &mut Option<LiveSession>,
     evt_tx: &Sender<DriverEvent>,
 ) {
@@ -181,17 +174,18 @@ fn tick_live<T: Transport>(
 
     let start = Instant::now();
     let step_res: Result<(), DeviceError> = (|| {
-        for rep in kb.read_notifications(Duration::ZERO)? {
-            match Notification::parse(&rep) {
-                Some(Notification::KeyEvent {
+        let model = kb.model();
+        for event in kb.poll_events(Duration::ZERO)? {
+            match event {
+                Notification::KeyEvent {
                     usage,
                     pressed: true,
-                }) => {
-                    if let Some(key) = key_by_usage(usage) {
+                } => {
+                    if let Some(key) = model.key_by_usage(usage) {
                         session.engine.key_pressed(key);
                     }
                 }
-                Some(Notification::BrightnessChanged { percent, .. }) => {
+                Notification::BrightnessChanged { percent, .. } => {
                     let _ = evt_tx.send(DriverEvent::LiveHardwareBrightness(percent));
                 }
                 _ => {}
@@ -214,16 +208,15 @@ fn tick_live<T: Transport>(
     }
 }
 
-fn worker_loop<T, F>(
+fn worker_loop<F>(
     mut opener: F,
     cmd_rx: Receiver<DriverCommand>,
     evt_tx: Sender<DriverEvent>,
     shutdown_flag: Arc<AtomicBool>,
 ) where
-    T: Transport,
-    F: FnMut() -> Result<Origins65<T>, DeviceError>,
+    F: FnMut() -> Result<Device, DeviceError>,
 {
-    let mut dev: Option<Origins65<T>> = None;
+    let mut dev: Option<Device> = None;
     let mut live: Option<LiveSession> = None;
 
     loop {
@@ -279,16 +272,15 @@ fn worker_loop<T, F>(
 }
 
 /// Returns `true` if the worker should terminate.
-fn handle_command<T, F>(
-    dev: &mut Option<Origins65<T>>,
+fn handle_command<F>(
+    dev: &mut Option<Device>,
     opener: &mut F,
     cmd: DriverCommand,
     live: &mut Option<LiveSession>,
     evt_tx: &Sender<DriverEvent>,
 ) -> bool
 where
-    T: Transport,
-    F: FnMut() -> Result<Origins65<T>, DeviceError>,
+    F: FnMut() -> Result<Device, DeviceError>,
 {
     match cmd {
         DriverCommand::Shutdown => return true,
@@ -375,9 +367,21 @@ where
                 ));
                 return false;
             }
+            let model = match ensure_device(dev, opener) {
+                Ok(kb) => kb.model(),
+                Err(err) => {
+                    *live = None;
+                    let _ = evt_tx.send(DriverEvent::LiveState {
+                        running: false,
+                        note: None,
+                    });
+                    let _ = evt_tx.send(DriverEvent::LiveExitedError(err));
+                    return false;
+                }
+            };
             let mut layers = Vec::with_capacity(specs.len());
             for spec in &specs {
-                match parse_layer_spec(spec) {
+                match parse_layer_spec_for(spec, model) {
                     Ok((layer, _)) => layers.push(layer),
                     Err(err) => {
                         *live = None;
@@ -389,15 +393,6 @@ where
                         return false;
                     }
                 }
-            }
-            if let Err(err) = ensure_device(dev, opener) {
-                *live = None;
-                let _ = evt_tx.send(DriverEvent::LiveState {
-                    running: false,
-                    note: None,
-                });
-                let _ = evt_tx.send(DriverEvent::LiveExitedError(err));
-                return false;
             }
             let period = Duration::from_secs_f64(1.0 / (fps.max(1) as f64));
             *live = Some(LiveSession {
@@ -440,13 +435,15 @@ where
                 if specs.is_empty() {
                     return Err("Add at least one layer before saving.".into());
                 }
+                let model: Model = ensure_device(dev, opener)?.model();
                 let mut layers = Vec::with_capacity(specs.len());
                 for spec in &specs {
-                    let (layer, _) = parse_layer_spec(spec)?;
+                    let (layer, _) = parse_layer_spec_for(spec, model)?;
                     layers.push(layer);
                 }
-                let prepared = prepare_onboard_save(&layers, brightness as f64)?;
-                let secs = (prepared.frames.len() as f64) / (SYNC_FPS as f64);
+                let prepared = prepare_onboard_save(&layers, brightness as f64, model)?;
+                let fps = model.sync_fps();
+                let secs = (prepared.frames.len() as f64) / (fps as f64);
                 let trig_suffix = match &prepared.trigger {
                     Some(t) => format!(", onboard key-press effect: {}", t.kind.name()),
                     None => String::new(),
@@ -455,14 +452,14 @@ where
                     slot,
                     percent: 0,
                     status: format!(
-                        "rendered {} frames ({secs:.1} s loop at {SYNC_FPS} fps){trig_suffix}",
+                        "rendered {} frames ({secs:.1} s loop at {fps} fps){trig_suffix}",
                         prepared.frames.len()
                     ),
                 });
 
                 let mut last_pct: Option<u8> = None;
                 run_device_op(dev, opener, |kb| {
-                    kb.save_prepared(slot, &prepared, activate, |done, total| {
+                    kb.save_prepared(slot, &prepared, activate, &mut |done, total| {
                         let pct = ((done * 100) / total).min(100) as u8;
                         if last_pct != Some(pct) || done == total {
                             last_pct = Some(pct);
@@ -496,6 +493,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use origins65::device::{Origins65, Transport};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -629,7 +627,7 @@ mod tests {
                 Duration::from_millis(200),
                 Duration::ZERO,
             );
-            Ok(kb)
+            Ok(Box::new(kb) as Box<dyn Keyboard>)
         });
 
         // 1. StartLive streams frames and forwards Fn brightness notifications.

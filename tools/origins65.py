@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-HyperX Alloy Origins 65 (03f0:038f) lighting driver for Linux.
+HyperX Alloy Origins 65 (03f0:038f) and Alloy Origins Core TKL (03f0:098f, 0951:16e6) lighting
+driver for Linux. The connected keyboard is detected automatically.
 
 Effects are written as layer specs, top layer first:
     NAME[:key=value,...]
@@ -27,15 +28,37 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from o65 import core, device  # noqa: E402
 from o65.device import ONBOARD_TRIGGERS, SLOTS, Origins65  # noqa: E402
 from o65.effects import EFFECTS, Engine, render_sync_frames  # noqa: E402
-from o65.layout import BY_NAME, BY_USAGE, KEYS, NUM_LEDS  # noqa: E402
+from o65.layout import NUM_LEDS  # noqa: E402
+from o65.models import BY_ID, MODELS, ORIGINS65, ORIGINS_CORE  # noqa: E402
 
 NAMED = {"red": (255, 0, 0), "green": (0, 255, 0), "blue": (0, 0, 255), "white": (255, 255, 255),
          "black": (0, 0, 0), "off": (0, 0, 0), "yellow": (255, 200, 0), "cyan": (0, 255, 255),
          "magenta": (255, 0, 255), "purple": (128, 0, 255), "orange": (255, 80, 0), "pink": (255, 60, 120)}
-SYNC_FPS = 20                    # KeyboardAlloyOrigins65.FramePerSecond
-SYNC_INTERVAL = 1000 // SYNC_FPS - 16  # value NGENUITY stores as the frame interval
+SYNC_FPS = ORIGINS65.sync_fps            # KeyboardAlloyOrigins65.FramePerSecond
+SYNC_INTERVAL = ORIGINS65.sync_interval  # value NGENUITY stores as the frame interval
+
+
+def detect_model():
+    """Model of the connected keyboard (the Origins 65 wins if both are plugged in), or None."""
+    if device.present():
+        return ORIGINS65
+    if core.present():
+        return ORIGINS_CORE
+    return None
+
+
+def open_keyboard(model=None):
+    model = model or detect_model()
+    if model is None:
+        ids = ", ".join(f"{v:04x}:{p:04x}" for m in MODELS for v, p in m.usb_ids)
+        raise SystemExit(f"no supported keyboard found ({ids})")
+    try:
+        return Origins65() if model is ORIGINS65 else core.OriginsCore()
+    except RuntimeError as e:  # not found
+        raise SystemExit(str(e)) from None
 
 
 def color(s):
@@ -48,7 +71,7 @@ def color(s):
     return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def parse_layer(spec):
+def parse_layer(spec, model=ORIGINS65):
     name, _, rest = spec.partition(":")
     name = name.lower()
     if name not in EFFECTS:
@@ -66,7 +89,7 @@ def parse_layer(spec):
             kw["colors"] = [color(c) for c in v.split("/")]
         elif k == "keys":
             names = [n.lower() for n in v.split("+")]
-            bad = [n for n in names if n not in BY_NAME]
+            bad = [n for n in names if n not in model.by_name]
             if bad:
                 raise SystemExit(f"unknown keys {bad}; run `origins65.py keys`")
             kw["keys"] = set(names)
@@ -79,10 +102,11 @@ def parse_layer(spec):
         else:
             raise SystemExit(f"unknown option {k!r} in {spec!r}")
     cls = EFFECTS[name]
-    if "speed" in kw and not cls.min_speed <= kw["speed"] <= cls.max_speed:
+    lo, hi, _ = model.speed_range(cls)
+    if "speed" in kw and not lo <= kw["speed"] <= hi:
         print(f"note: {name} speed {kw['speed']} is outside NGENUITY's range "
-              f"{cls.min_speed}..{cls.max_speed} ms", file=sys.stderr)
-    return cls(**kw)
+              f"{lo}..{hi} ms", file=sys.stderr)
+    return cls(model=model, **kw)
 
 
 def scaled(frame, k):
@@ -115,13 +139,14 @@ def cmd_info(kb, args):
             except Exception as e:  # noqa: BLE001
                 slots.append({"index": s, "profile": None, "error": str(e)})
         payload = {
+            "model": kb.model.id,
             **info,
             "current": _profile_dict(current),
             "slots": slots,
         }
         print(json.dumps(payload))
         return
-    print(f"HyperX Alloy Origins 65  {info['vid']}:{info['pid']}  firmware {info['firmware']}  "
+    print(f"{kb.model.name}  {info['vid']}:{info['pid']}  firmware {info['firmware']}  "
           f"country code {info['country_code']}")
     print("current profile:", current.describe())
     for s in range(SLOTS):
@@ -142,7 +167,7 @@ def cmd_slot(kb, args):
 
 
 def cmd_live(kb, args):
-    layers = [parse_layer(s) for s in args.layers]
+    layers = [parse_layer(s, kb.model) for s in args.layers]
     engine = Engine(layers)
     stop = []
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
@@ -154,19 +179,19 @@ def cmd_live(kb, args):
         start = time.monotonic()
         if args.duration and start - t0 >= args.duration:
             break
-        for rep in kb.read_notifications():
-            if len(rep) >= 4 and rep[0] == 5 and rep[1] == 4 and rep[3] == 1:
-                key = BY_USAGE.get(rep[2])
+        for ev in kb.events():
+            if ev[0] == "key" and ev[2]:
+                key = kb.model.by_usage.get(ev[1])
                 if key:
                     engine.key_pressed(key)
-            elif len(rep) >= 3 and rep[0] == 5 and rep[1] == 8:
-                print(f"hardware brightness changed to {round(rep[2] / 2.55)}%")
+            elif ev[0] == "brightness":
+                print(f"hardware brightness changed to {ev[1]}%")
         kb.send_direct_frame(scaled(engine.frame(), args.brightness / 100))
         time.sleep(max(0.0, period - (time.monotonic() - start)))
 
 
-def cmd_save(kb, args):
-    layers = [parse_layer(s) for s in args.layers]
+def prepare_save(layers, model, brightness):
+    """(frames, trigger) for onboard storage, or SystemExit with the reason it can't be stored."""
     looped = [l for l in layers if not l.triggered]
     triggers = [l for l in layers if l.triggered]
     if len(triggers) > 1:
@@ -176,33 +201,32 @@ def cmd_save(kb, args):
         t = triggers[0]
         if t.name not in ONBOARD_TRIGGERS:
             raise SystemExit(f"{t.name} can't run onboard; the firmware supports: {', '.join(ONBOARD_TRIGGERS)}")
-        sp = (min(max(t.speed, t.min_speed), t.max_speed) - t.min_speed) / (t.max_speed - t.min_speed) * 255
+        sp = (min(max(t.speed, t.min_speed), t.max_speed) - t.min_speed) / (t.max_speed - t.min_speed)
+        sp *= model.trigger_speed_max
         trigger = {"kind": t.name, "colors": t.colors or [t.color], "random": t.random_color, "speed": int(sp)}
-    frames = render_sync_frames(looped, fps=SYNC_FPS, max_frames=120)
-    frames = scaled_frames = [scaled(f, args.brightness / 100) for f in frames]
-    print(f"rendered {len(scaled_frames)} frames ({len(frames) / SYNC_FPS:.1f} s loop at {SYNC_FPS} fps)"
+    frames = render_sync_frames(looped, fps=model.sync_fps, max_frames=model.max_sync_frames)
+    return [scaled(f, brightness / 100) for f in frames], trigger
+
+
+def cmd_save(kb, args):
+    model = kb.model
+    layers = [parse_layer(s, model) for s in args.layers]
+    frames, trigger = prepare_save(layers, model, args.brightness)
+    print(f"rendered {len(frames)} frames ({len(frames) / model.sync_fps:.1f} s loop at {model.sync_fps} fps)"
           + (f", onboard key-press effect: {trigger['kind']}" if trigger else ""))
 
     def progress(done, total):
         print(f"\ruploading to slot {args.slot}: {done * 100 // total:3d}%", end="", flush=True)
 
-    kb.upload_animation(args.slot, frames, SYNC_INTERVAL, trigger, progress)
+    note = kb.save_animation(args.slot, frames, trigger, not args.no_activate, progress)
     print()
-    try:  # store the slot number in the slot's own profile, as NGENUITY does
-        prof = kb.read_profile(slot=args.slot)
-        prof.slot = args.slot
-        kb.write_profile(prof, slot=args.slot)
-    except Exception as e:  # noqa: BLE001
-        print(f"note: could not update slot {args.slot} profile ({e})", file=sys.stderr)
-    if not args.no_activate:
-        kb.select_slot(args.slot, force_reload=True)
-    elif kb.active_slot() == args.slot:
-        kb.select_slot(args.slot, force_reload=True)  # slot is showing: reload so the new animation plays
+    if note:
+        print(note, file=sys.stderr)
     print(f"saved to onboard slot {args.slot}" + ("" if args.no_activate else " and activated"))
 
 
 def cmd_identify(kb, args):
-    order = sorted(KEYS, key=lambda k: (k.row, k.col))
+    order = sorted(kb.model.keys, key=lambda k: (k.row, k.col))
     stop = []
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     for k in order:
@@ -217,8 +241,19 @@ def cmd_identify(kb, args):
             time.sleep(0.03)
 
 
+def effect_lines(model):
+    lines = []
+    for name, cls in EFFECTS.items():
+        kind = "key-press" + (" (onboard ok)" if name in ONBOARD_TRIGGERS else " (live only)") \
+            if cls.triggered else "looped"
+        lo, hi, default = model.speed_range(cls)
+        lines.append(f"{name:10s} {kind:22s} speed {lo}-{hi} ms, default {default}")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model", choices=list(BY_ID), help="keyboard model (default: detect the connected one)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     inf = sub.add_parser("info", help="device, firmware and profile information")
     inf.add_argument("--json", action="store_true", help="output machine-readable JSON")
@@ -241,17 +276,17 @@ def main():
     sub.add_parser("keys", help="list key names")
     sub.add_parser("effects", help="list effects")
     args = ap.parse_args()
+    model = BY_ID[args.model] if args.model else None
 
-    if args.cmd == "keys":
-        print(" ".join(k.name for k in KEYS))
+    if args.cmd in ("keys", "effects"):
+        model = model or detect_model() or ORIGINS65
+        if args.cmd == "keys":
+            print(" ".join(k.name for k in model.keys))
+        else:
+            for line in effect_lines(model):
+                print(line)
         return
-    if args.cmd == "effects":
-        for name, cls in EFFECTS.items():
-            kind = "key-press" + (" (onboard ok)" if name in ONBOARD_TRIGGERS else " (live only)") \
-                if cls.triggered else "looped"
-            print(f"{name:10s} {kind:22s} speed {cls.min_speed}-{cls.max_speed} ms, default {cls.default_speed}")
-        return
-    with Origins65() as kb:
+    with open_keyboard(model) as kb:
         {"info": cmd_info, "brightness": cmd_brightness, "slot": cmd_slot, "live": cmd_live,
          "save": cmd_save, "identify": cmd_identify}[args.cmd](kb, args)
 
